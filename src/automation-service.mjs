@@ -238,6 +238,15 @@ import {
   roomSnapshot,
 } from "./placement-rooms.mjs";
 import {
+  applyRoomServiceOrder,
+  getRoomServiceOrder,
+  isRoomServiceOrderKind,
+  prepareRoomServiceOrder,
+  restoreRoomServiceOrder,
+  roomServiceOrderContract,
+  roomServiceOrderHubStepsSent,
+} from "./room-service-order.mjs";
+import {
   blockCreateRequest,
   blockMatchesRequested,
   blockRuleEffects,
@@ -282,6 +291,7 @@ import {
   accessoryMentions,
   codeShownRedacted,
   idListLines,
+  roomVisibleTiles,
   SprutHubError,
   sanitizeAgentOutput,
   sanitizeNativeData,
@@ -475,6 +485,34 @@ export class AutomationService {
         contract: dashboardContract(input.operation),
       };
     }
+    if (isRoomServiceOrderKind(input.operation)) {
+      if (input.target_ref === undefined) {
+        return {
+          status: "ok",
+          operation: input.operation,
+          contract: roomServiceOrderContract(),
+        };
+      }
+      const roomId = parseRoomRef(input.target_ref, this.hubSerial);
+      const room = await this.client.getRoom(roomId);
+      if (!room) {
+        throw new SprutHubError(
+          "room_not_found",
+          "The selected SprutHub room was not found.",
+          "home_overview",
+        );
+      }
+      const accessories = await this.client.listRoomAccessories(roomId);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: roomServiceOrderContract(
+          { ref: input.target_ref, name: room.name },
+          roomVisibleTiles(accessories, this.hubSerial),
+        ),
+      };
+    }
     if (isCatalogChangeKind(input.operation)) {
       return {
         status: "ok",
@@ -636,6 +674,9 @@ export class AutomationService {
     }
     if (isDashboardChangeKind(input.operation)) {
       return prepareDashboardChange(this.#dashboardContext(), input);
+    }
+    if (isRoomServiceOrderKind(input.operation)) {
+      return prepareRoomServiceOrder(this.#dashboardContext(), input);
     }
     if (isCatalogChangeKind(input.operation)) {
       return prepareCatalogChange(this.#dashboardContext(), input);
@@ -2691,6 +2732,9 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return applyDashboardChange(this.#dashboardContext(), change);
     }
+    if (isRoomServiceOrderKind(change.kind)) {
+      return applyRoomServiceOrder(this.#dashboardContext(), change);
+    }
     if (isCatalogChangeKind(change.kind)) {
       return applyCatalogChange(this.#dashboardContext(), change);
     }
@@ -3513,6 +3557,9 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return getDashboardChange(this.#dashboardContext(), change);
     }
+    if (isRoomServiceOrderKind(change.kind)) {
+      return getRoomServiceOrder(this.#dashboardContext(), change);
+    }
     if (isCatalogChangeKind(change.kind)) {
       return getCatalogChange(this.#dashboardContext(), change);
     }
@@ -3702,6 +3749,11 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return this.#undoOrUnknown(change, () =>
         restoreDashboardChange(this.#dashboardContext(), change),
+      );
+    }
+    if (isRoomServiceOrderKind(change.kind)) {
+      return this.#undoOrUnknown(change, () =>
+        restoreRoomServiceOrder(this.#dashboardContext(), change),
       );
     }
     if (isCatalogChangeKind(change.kind)) {
@@ -8422,6 +8474,9 @@ function hubStepsSent(change, direction) {
   }
   if (isDashboardChangeKind(change.kind)) {
     return dashboardHubStepsSent(change, direction);
+  }
+  if (isRoomServiceOrderKind(change.kind)) {
+    return roomServiceOrderHubStepsSent(change, direction);
   }
   if (isCatalogChangeKind(change.kind)) {
     return catalogHubStepsSent(change, direction);

@@ -188,7 +188,7 @@ test("get_entity(room_ref) returns tile_order in SprutHub display order (1..N th
   assert.ok(study.service_count > 20);
   assert.equal(study.next?.tool, "find_devices");
   assert.ok(Array.isArray(study.tile_order));
-  assert.equal(study.tile_order.length, 13);
+  assert.equal(study.tile_order.length, 14);
   assert.deepEqual(
     study.tile_order.slice(0, 3).map(({ order }) => order),
     [1, 2, 3],

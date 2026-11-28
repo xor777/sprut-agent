@@ -1748,6 +1748,111 @@ export class SprutHubClient {
     }
   }
 
+  async listRoomAccessories(
+    roomId,
+    deadline = Date.now() + this.timeoutMs,
+    options,
+  ) {
+    if (!isStableId(roomId)) {
+      throw new SprutHubError(
+        "invalid_room_ref",
+        "Use a home-qualified room reference returned by home_overview.",
+        "home_overview",
+      );
+    }
+    const response = await this.#request(
+      {
+        accessory: {
+          list: {
+            roomId,
+            expand: "services,characteristics",
+          },
+        },
+      },
+      deadline,
+      options,
+    );
+    const accessories = extractNativeList(response, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    accessories.forEach(validateAccessory);
+    return accessories.filter(
+      ({ roomId: accessoryRoomId }) => accessoryRoomId === roomId,
+    );
+  }
+
+  // Reorders visible room service tiles via service.orders, sending only
+  // { aId, sId, grid: { order } } so SprutHub preserves existing width/height.
+  async reorderServices(orders) {
+    if (!Array.isArray(orders) || orders.length === 0) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "reorderServices requires a non-empty orders array.",
+      );
+    }
+    const normalized = orders.map((entry) => {
+      if (
+        !isPlainObject(entry) ||
+        !isPositiveDashboardId(entry.aId) ||
+        !isPositiveDashboardId(entry.sId) ||
+        !isPlainObject(entry.grid) ||
+        !isStableId(entry.grid.order)
+      ) {
+        throw new SprutHubError(
+          "invalid_native_value",
+          "Each service order entry requires positive aId, sId and grid.order (non-negative integer).",
+        );
+      }
+      return {
+        aId: entry.aId,
+        sId: entry.sId,
+        grid: { order: entry.grid.order },
+      };
+    });
+    const response = await this.#request(
+      { service: { orders: { orders: normalized } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.service;
+    if (
+      !container ||
+      !Object.hasOwn(container, "orders") ||
+      !isPlainObject(container.orders)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the service reorder.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+    let returned;
+    try {
+      returned = extractNativeList(response, ["service", "orders", "orders"]);
+      for (const entry of returned) validateServiceOrder(entry);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return returned.map((entry) => ({
+      aId: entry.aId,
+      sId: entry.sId,
+      grid: {
+        order:
+          entry.grid && isStableId(entry.grid.order)
+            ? entry.grid.order
+            : isStableId(entry.order)
+              ? entry.order
+              : 0,
+      },
+    }));
+  }
+
   async deleteRoom(id) {
     const response = await this.#request(
       { room: { delete: { id } } },
@@ -3050,6 +3155,14 @@ export class SprutHubClient {
     ]);
     accessories.forEach(validateAccessory);
     const inRoom = accessories.filter(({ roomId }) => roomId === room.id);
+    const tileOrder = roomVisibleTiles(inRoom, parsed.serial).map(
+      ({ service_ref, name, type, order }) => ({
+        service_ref,
+        name,
+        type,
+        order,
+      }),
+    );
     const serviceCount = inRoom.reduce(
       (count, accessory) => count + (accessory.services ?? []).length,
       0,
@@ -3064,6 +3177,7 @@ export class SprutHubClient {
         ...identity,
         accessory_count: inRoom.length,
         service_count: serviceCount,
+        tile_order: tileOrder,
         next: {
           tool: "find_devices",
           arguments: {
@@ -3075,6 +3189,7 @@ export class SprutHubClient {
     }
     return {
       ...identity,
+      tile_order: tileOrder,
       accessories: inRoom.map((accessory) => ({
         ref: accessoryRef(parsed.serial, accessory.id),
         name: accessory.name,
@@ -6140,6 +6255,60 @@ function validateDashboardWidgetOrder(entry) {
       "SprutHub returned an incompatible dashboard widget order message.",
     );
   }
+}
+
+function validateServiceOrder(entry) {
+  if (
+    !isPlainObject(entry) ||
+    !isPositiveDashboardId(entry.aId) ||
+    !isPositiveDashboardId(entry.sId) ||
+    (entry.order !== undefined && !isStableId(entry.order)) ||
+    (entry.grid !== undefined &&
+      (!isPlainObject(entry.grid) ||
+        (entry.grid.order !== undefined && !isStableId(entry.grid.order))))
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible service order message.",
+    );
+  }
+}
+
+export function roomVisibleTiles(accessories, serial) {
+  const tiles = [];
+  for (const accessory of accessories ?? []) {
+    for (const service of accessory.services ?? []) {
+      if (
+        service.type === "AccessoryInformation" ||
+        service.system === true ||
+        service.visible === false
+      ) {
+        continue;
+      }
+      const order =
+        Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0
+          ? service.grid.order
+          : 0;
+      tiles.push({
+        aId: accessory.id,
+        sId: service.sId,
+        service_ref: serviceRef(serial, accessory.id, service.sId),
+        name: service.name,
+        type: service.type,
+        order,
+      });
+    }
+  }
+  tiles.sort((left, right) => {
+    const leftOrdered = left.order > 0;
+    const rightOrdered = right.order > 0;
+    if (leftOrdered !== rightOrdered) return leftOrdered ? -1 : 1;
+    if (leftOrdered && left.order !== right.order) {
+      return left.order - right.order;
+    }
+    return left.aId - right.aId || left.sId - right.sId;
+  });
+  return tiles;
 }
 
 function detectDashboardWidgetKind(widget) {

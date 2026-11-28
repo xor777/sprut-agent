@@ -28,6 +28,11 @@ import {
   nativeValueRestoration,
 } from "./native-values.mjs";
 import {
+  isRoomServiceOrderKind,
+  roomServiceOrderAffectedRefs,
+  roomServiceOrderRestoreSupported,
+} from "./room-service-order.mjs";
+import {
   isLogicSourceChange,
   scenarioConflictAsksForNewPrepare,
   scenarioRestoreSupported,
@@ -138,6 +143,12 @@ export function summaryRestoreSupported(change) {
   }
   if (isDashboardChangeKind(change.kind)) {
     return dashboardRestoreSupported(change, { activeStatus, isConflict });
+  }
+  if (isRoomServiceOrderKind(change.kind)) {
+    return roomServiceOrderRestoreSupported(change, {
+      activeStatus,
+      isConflict,
+    });
   }
   if (isCatalogChangeKind(change.kind)) {
     return catalogRestoreSupported(change, { activeStatus, isConflict });
@@ -781,6 +792,10 @@ export function nativeAffectedRefs(change, homeRef) {
     }
   } else if (isDashboardChangeKind(change.kind)) {
     refs.push(...dashboardAffectedRefs(change, homeRef, canonicalAncestors));
+  } else if (isRoomServiceOrderKind(change.kind)) {
+    refs.push(
+      ...roomServiceOrderAffectedRefs(change, homeRef, canonicalAncestors),
+    );
   } else if (isCatalogChangeKind(change.kind)) {
     refs.push(...catalogAffectedRefs(change));
   }
