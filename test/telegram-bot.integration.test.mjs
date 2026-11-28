@@ -3,12 +3,14 @@ import { spawn } from "node:child_process";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readlink,
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import http from "node:http";
@@ -1336,17 +1338,27 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
     harness.authFile,
   );
 
-  const skillLink = await lstat(
-    path.join(codexHome, "skills", "spruthub-master"),
+  // Legacy codexHome/skills/spruthub-master symlink must not exist so Codex
+  // does not trigger skill-announcement commentary; instead the guidance is
+  // embedded in developerInstructions and references are linked in workspace.
+  await assert.rejects(
+    lstat(path.join(codexHome, "skills", "spruthub-master")),
+    { code: "ENOENT" },
+    "codexHome/skills/spruthub-master must not be symlinked as a Codex skill",
+  );
+  const refsLink = await lstat(
+    path.join(harness.stateDir, "workspace", "spruthub-references"),
   );
   assert.equal(
-    skillLink.isSymbolicLink(),
+    refsLink.isSymbolicLink(),
     true,
-    "skills/spruthub-master must be a symlink",
+    "workspace/spruthub-references must be a symlink",
   );
   assert.equal(
-    await readlink(path.join(codexHome, "skills", "spruthub-master")),
-    path.join(REPO_ROOT, "skills", "spruthub-master"),
+    await readlink(
+      path.join(harness.stateDir, "workspace", "spruthub-references"),
+    ),
+    path.join(REPO_ROOT, "skills", "spruthub-master", "references"),
   );
 
   // Verify thread/start parameters and child env isolation
@@ -1383,6 +1395,23 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
   assert.match(
     threadStartReq.msg.params.developerInstructions,
     /Полосатый Кот|дом/i,
+  );
+  assert.match(
+    threadStartReq.msg.params.developerInstructions,
+    /# SprutHub Master/,
+    "default Telegram developerInstructions must inline SKILL.md guidance",
+  );
+  assert.match(
+    threadStartReq.msg.params.developerInstructions,
+    /spruthub-references\/dashboards\.md/,
+    "inlined guidance must point reference cards at workspace spruthub-references/",
+  );
+  assert.equal(
+    threadStartReq.msg.params.developerInstructions.includes(
+      "name: spruthub-master",
+    ),
+    false,
+    "YAML frontmatter must be stripped from inlined SKILL.md",
   );
 
   const turnStartReq = trace.find(
@@ -2654,9 +2683,16 @@ test("TelegramApi supports silent sendMessage, HTML editMessageText with parse f
   assert.deepEqual(deleted[0], { chat_id: 2001, message_id: msgId });
 });
 
-test("TelegramBotRunner shows a single silent in-place progress status on long turns, redacts commentary secrets, and deletes it before the final or error reply", async (t) => {
+test("TelegramBotRunner keeps a single silent in-place progress status on long turns, redacts commentary secrets, never deletes it, and posts the final or error reply after it", async (t) => {
   const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
   const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  // Pre-seed a legacy skills/spruthub-master symlink to verify prepareEnvironment cleans it up.
+  const legacySkillDir = path.join(harness.stateDir, "codex-home", "skills");
+  await mkdir(legacySkillDir, { recursive: true });
+  await symlink(
+    path.join(REPO_ROOT, "skills", "spruthub-master"),
+    path.join(legacySkillDir, "spruthub-master"),
+  );
   const config = await loadTelegramConfig({ env: harness.baseEnv });
 
   const runner = new TelegramBotRunner({
@@ -2670,9 +2706,14 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   });
   await runner.start();
   harness.onCleanup(() => runner.stop());
+  await assert.rejects(
+    lstat(path.join(legacySkillDir, "spruthub-master")),
+    { code: "ENOENT" },
+    "prepareEnvironment must remove legacy skills/spruthub-master symlink",
+  );
 
   // 1. Long turn with NO commentary (also warms up the app-server child):
-  //    silent fallback "Работаю над запросом…", deleted before final reply
+  //    silent fallback "Работаю над запросом…", kept in chat, final reply sent after it
   const callsBeforeSilent = harness.tg.calls.length;
   harness.tg.pushUpdate(makePrivateMessageUpdate(701, 1001, "[LONG_SILENT]"));
   await waitFor(() =>
@@ -2691,12 +2732,12 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
     );
   assert.deepEqual(
     silentTurnCalls.map((c) => c.method),
-    ["sendMessage", "deleteMessage", "sendMessage"],
+    ["sendMessage", "sendMessage"],
   );
   assert.equal(silentTurnCalls[0].body.disable_notification, true);
   assert.equal(silentTurnCalls[0].body.text, "Работаю над запросом…");
-  assert.equal(silentTurnCalls[2].body.disable_notification, undefined);
-  assert.equal(silentTurnCalls[2].body.text, "Готово без комментариев.");
+  assert.equal(silentTurnCalls[1].body.disable_notification, undefined);
+  assert.equal(silentTurnCalls[1].body.text, "Готово без комментариев.");
 
   // 2. Fast turn on warm session (< progressDelayMs): ZERO progress messages, ZERO edits, ZERO deletes
   const callsBeforeFast = harness.tg.calls.length;
@@ -2724,7 +2765,7 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   assert.equal(fastCalls[0].body.disable_notification, undefined);
 
   // 3. Long turn with commentary updates + secret in commentary:
-  //    1 silent send -> in-place edit(s) on same message_id -> delete before final reply
+  //    1 silent send -> in-place edit(s) on same message_id -> kept in chat -> final reply sent after
   const callsBeforeCommentary = harness.tg.calls.length;
   harness.tg.pushUpdate(
     makePrivateMessageUpdate(
@@ -2774,11 +2815,11 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   );
   assert.equal(
     deletes.length,
-    1,
-    "temporary status message must be deleted before the final reply",
+    0,
+    "progress status message must never be deleted",
   );
 
-  const statusMsgId = deletes[0].body.message_id;
+  const statusMsgId = edits[0].body.message_id;
   for (const edit of edits) {
     assert.equal(
       edit.body.message_id,
@@ -2791,13 +2832,10 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
       "edited progress status must never leak TELEGRAM_BOT_TOKEN",
     );
   }
-  assert.ok(
-    edits.some(
-      (e) =>
-        e.body.text.includes("<b>ZigBee</b>") ||
-        e.body.text.includes("Собираю ответ…"),
-    ),
-    "in-place edits must show updated formatted commentary",
+  assert.equal(
+    edits[edits.length - 1].body.text,
+    "Собираю ответ…",
+    "final progress message must reflect the latest commentary before the final reply",
   );
   assert.equal(
     sends[1].body.disable_notification,
@@ -2806,16 +2844,17 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   );
   assert.equal(sends[1].body.text, "Итоговый ответ после диагностики.");
 
-  // Verify chronological ordering: silent send < edits < delete < final send
+  // Verify chronological ordering: silent send < edits < final send (no delete)
   const idxSilentSend = commentaryCalls.indexOf(sends[0]);
   const idxLastEdit = commentaryCalls.indexOf(edits[edits.length - 1]);
-  const idxDelete = commentaryCalls.indexOf(deletes[0]);
   const idxFinalSend = commentaryCalls.indexOf(sends[1]);
   assert.ok(idxSilentSend < idxLastEdit, "edits must follow initial send");
-  assert.ok(idxLastEdit < idxDelete, "delete must follow all edits");
-  assert.ok(idxDelete < idxFinalSend, "delete must happen before final reply");
+  assert.ok(
+    idxLastEdit < idxFinalSend,
+    "all progress edits must finish before the final reply",
+  );
 
-  // 4. Long turn that times out -> status message deleted before error reply
+  // 4. Long turn that times out -> status message kept in chat, error reply sent after it
   const callsBeforeTimeout = harness.tg.calls.length;
   harness.tg.pushUpdate(makePrivateMessageUpdate(704, 1001, "[HANG]"));
   await waitFor(() => {
@@ -2833,10 +2872,62 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
     );
   assert.deepEqual(
     timeoutCalls.map((c) => c.method),
-    ["sendMessage", "deleteMessage", "sendMessage"],
+    ["sendMessage", "sendMessage"],
   );
   assert.equal(timeoutCalls[0].body.disable_notification, true);
-  assert.equal(timeoutCalls[2].body.disable_notification, undefined);
+  assert.equal(timeoutCalls[1].body.disable_notification, undefined);
+
+  await runner.stop();
+
+  // 5. Large progressEditIntervalMs: throttled latest commentary still flushes
+  //    on finish() before the final reply, and never deletes the status message.
+  const runnerSlowEdit = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 90,
+    progressEditIntervalMs: 10_000,
+    logger: () => {},
+  });
+  await runnerSlowEdit.start();
+  harness.onCleanup(() => runnerSlowEdit.stop());
+
+  harness.tg.pushUpdate(makePrivateMessageUpdate(705, 1001, "Прогрев flush"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Прогрев flush"),
+  );
+
+  const callsBeforeFlush = harness.tg.calls.length;
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(706, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBeforeFlush)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const flushCalls = harness.tg.calls
+    .slice(callsBeforeFlush)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    flushCalls.map((c) => c.method),
+    ["sendMessage", "editMessageText", "sendMessage"],
+    "throttled commentary must flush once on finish() before final reply without deleting",
+  );
+  assert.equal(flushCalls[1].body.text, "Собираю ответ…");
 });
 
 test("TelegramBotRunner does not retry-storm on progress editMessageText 429, permanent 400, or 500 errors and still delivers final replies", async (t) => {
@@ -2897,8 +2988,8 @@ test("TelegramBotRunner does not retry-storm on progress editMessageText 429, pe
   );
   assert.equal(
     deletes429.length,
-    1,
-    "status message must still be deleted after 429 edit failure",
+    0,
+    "status message must not be deleted after 429 edit failure",
   );
 
   // Case B: Persistent HTTP 400 "message to edit not found" disables further edits & skips delete
