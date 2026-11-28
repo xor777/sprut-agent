@@ -426,6 +426,7 @@ export class TelegramBotRunner {
   #createProgressTracker(chatId) {
     let closed = false;
     let editsDisabled = false;
+    let lastEditFailed = false;
     let statusMessageId = null;
     let latestText = "";
     let displayedText = "";
@@ -476,9 +477,11 @@ export class TelegramBotRunner {
               { signal: this.#abortController?.signal },
             );
             displayedText = targetText;
+            lastEditFailed = false;
             nextEditAt = this.#now() + this.#progressEditIntervalMs;
           } catch (error) {
             failed = true;
+            lastEditFailed = true;
             if (this.#stopped || error?.name === "AbortError") return;
             this.#logger(
               `[telegram] progress edit failed for chat ${chatId}: ${error?.message ?? String(error)}`,
@@ -591,16 +594,34 @@ export class TelegramBotRunner {
           clearTimeout(editTimer);
           editTimer = null;
         }
+        // Keep the edited progress message in chat (never delete it) and flush
+        // any newer throttled commentary before the final reply follows.
         return enqueueOp(async () => {
-          if (statusMessageId == null) return;
           const messageId = statusMessageId;
           statusMessageId = null;
-          const deleteOptions = this.#stopped
-            ? { timeoutMs: 500 }
-            : { signal: this.#abortController?.signal };
-          await this.#api
-            .deleteMessage(chatId, messageId, deleteOptions)
-            .catch(() => {});
+          if (
+            this.#stopped ||
+            messageId == null ||
+            editsDisabled ||
+            lastEditFailed ||
+            !latestText ||
+            latestText === displayedText ||
+            latestText === lastAttemptedText
+          ) {
+            return;
+          }
+          lastAttemptedText = latestText;
+          try {
+            await this.#api.editMessageText(chatId, messageId, latestText, {
+              signal: this.#abortController?.signal,
+            });
+            displayedText = latestText;
+          } catch (error) {
+            if (this.#stopped || error?.name === "AbortError") return;
+            this.#logger(
+              `[telegram] progress final edit failed for chat ${chatId}: ${error?.message ?? String(error)}`,
+            );
+          }
         });
       },
     };

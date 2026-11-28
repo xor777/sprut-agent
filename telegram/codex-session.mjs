@@ -117,6 +117,35 @@ async function ensureSymlink(linkPath, targetPath) {
   await symlink(targetPath, linkPath);
 }
 
+async function removeSymlinkIfPresent(linkPath) {
+  try {
+    const info = await lstat(linkPath);
+    if (info.isSymbolicLink()) {
+      await unlink(linkPath);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function loadInlineSprutHubGuidance(repoRoot) {
+  const skillPath = path.join(
+    repoRoot,
+    "skills",
+    "spruthub-master",
+    "SKILL.md",
+  );
+  let raw;
+  try {
+    raw = await readFile(skillPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  }
+  const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/, "").trim();
+  return body.replaceAll("(references/", "(spruthub-references/");
+}
+
 function buildCodexConfigToml({
   model,
   effort,
@@ -619,6 +648,7 @@ export class CodexSessionManager {
   #config;
   #repoRoot;
   #developerInstructions;
+  #hasCustomDeveloperInstructions;
   #env;
   #logger;
   #packageVersion;
@@ -636,7 +666,7 @@ export class CodexSessionManager {
   constructor({
     config,
     repoRoot = DEFAULT_REPO_ROOT,
-    developerInstructions = TELEGRAM_DEVELOPER_INSTRUCTIONS,
+    developerInstructions,
     env = process.env,
     logger = () => {},
     packageVersion = readPackageVersion(repoRoot),
@@ -644,7 +674,9 @@ export class CodexSessionManager {
   }) {
     this.#config = config;
     this.#repoRoot = path.resolve(repoRoot);
-    this.#developerInstructions = developerInstructions;
+    this.#hasCustomDeveloperInstructions = developerInstructions !== undefined;
+    this.#developerInstructions =
+      developerInstructions ?? TELEGRAM_DEVELOPER_INSTRUCTIONS;
     this.#env = env;
     this.#logger = logger;
     this.#packageVersion = packageVersion;
@@ -687,10 +719,23 @@ export class CodexSessionManager {
       path.join(this.codexHome, "auth.json"),
       this.#config.codexAuthPath,
     );
-    await ensureSymlink(
+    // Do not expose spruthub-master as a Codex skill inside the dedicated
+    // Telegram CODEX_HOME: Codex's system prompt instructs the model to
+    // announce skill usage in commentary on first load. Inline SKILL.md into
+    // developerInstructions instead and symlink only references in workspace.
+    await removeSymlinkIfPresent(
       path.join(this.codexHome, "skills", "spruthub-master"),
-      path.join(this.#repoRoot, "skills", "spruthub-master"),
     );
+    await ensureSymlink(
+      path.join(this.workspaceDir, "spruthub-references"),
+      path.join(this.#repoRoot, "skills", "spruthub-master", "references"),
+    );
+    if (!this.#hasCustomDeveloperInstructions) {
+      const guidance = await loadInlineSprutHubGuidance(this.#repoRoot);
+      this.#developerInstructions = guidance
+        ? `${TELEGRAM_DEVELOPER_INSTRUCTIONS}\n\n${guidance}`
+        : TELEGRAM_DEVELOPER_INSTRUCTIONS;
+    }
 
     const toml = buildCodexConfigToml({
       model: this.#config.codexModel,
